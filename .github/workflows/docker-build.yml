@@ -4,6 +4,10 @@ on:
   push:
     branches:
       - main
+    tags:
+      - 'v*.*.*' # Hỗ trợ build khi có tag version (theo semantic versioning)
+
+  workflow_dispatch: # Cho phép trigger workflow thủ công
 
 jobs:
   build-and-push:
@@ -24,12 +28,31 @@ jobs:
           echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
           echo "branch_name=${GITHUB_REF_NAME}" >> $GITHUB_ENV
 
+      - name: Cache Docker layers
+        uses: actions/cache@v3
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-docker-${{ env.sha_short }}
+          restore-keys: |
+            ${{ runner.os }}-docker-
+
+      - name: Set Docker image tags
+        id: tag
+        run: |
+          if [[ $GITHUB_REF_TYPE == "tag" ]]; then
+            echo "image_tag=${GITHUB_REF_NAME}" >> $GITHUB_ENV
+          elif [[ $GITHUB_REF_NAME == "main" ]]; then
+            echo "image_tag=latest" >> $GITHUB_ENV
+          else
+            echo "image_tag=${GITHUB_REF_NAME}" >> $GITHUB_ENV
+
       - name: Build and push frontend
         uses: docker/build-push-action@v4
         with:
           context: .
           push: true
           tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/frontend_full:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/frontend_full:${{ env.image_tag }}
             ${{ secrets.DOCKERHUB_USERNAME }}/frontend_full:${{ env.sha_short }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/frontend_full:${{ env.branch_name }}
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache,mode=max
