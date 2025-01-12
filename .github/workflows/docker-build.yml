@@ -4,55 +4,110 @@ on:
   push:
     branches:
       - main
-    tags:
-      - 'v*.*.*' # Hỗ trợ build khi có tag version (theo semantic versioning)
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+  # Allow manual trigger
+  workflow_dispatch:
 
-  workflow_dispatch: # Cho phép trigger workflow thủ công
+env:
+  # Configure environment variables
+  DOCKER_IMAGE_NAME: frontend_full
+  DOCKER_BUILDKIT: 1  # Enable BuildKit for better performance
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v2
+        uses: actions/checkout@v4
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          fetch-depth: 0  # Fetch all history for proper versioning
 
-      - name: Extract Git SHA and branch name
-        id: vars
-        run: |
-          echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
-          echo "branch_name=${GITHUB_REF_NAME}" >> $GITHUB_ENV
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          buildkitd-flags: --debug
 
       - name: Cache Docker layers
         uses: actions/cache@v3
         with:
           path: /tmp/.buildx-cache
-          key: ${{ runner.os }}-docker-${{ env.sha_short }}
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-docker-
+            ${{ runner.os }}-buildx-
 
-      - name: Set Docker image tags
-        id: tag
+      - name: Extract metadata for Docker
+        id: meta
         run: |
-          if [[ $GITHUB_REF_TYPE == "tag" ]]; then
-            echo "image_tag=${GITHUB_REF_NAME}" >> $GITHUB_ENV
-          elif [[ $GITHUB_REF_NAME == "main" ]]; then
-            echo "image_tag=latest" >> $GITHUB_ENV
-          else
-            echo "image_tag=${GITHUB_REF_NAME}" >> $GITHUB_ENV
+          echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+          echo "branch_name=${GITHUB_REF_NAME}" >> $GITHUB_ENV
+          echo "timestamp=$(date +%Y%m%d_%H%M%S)" >> $GITHUB_ENV
 
-      - name: Build and push frontend
-        uses: docker/build-push-action@v4
+      - name: Login to Docker Hub
+        if: github.event_name != 'pull_request'  # Don't push on PR
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Scan Dockerfile for vulnerabilities
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'config'
+          hide-progress: false
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
         with:
           context: .
-          push: true
+          file: ./Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
           tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/frontend_full:${{ env.image_tag }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/frontend_full:${{ env.sha_short }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.DOCKER_IMAGE_NAME }}:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.DOCKER_IMAGE_NAME }}:${{ env.sha_short }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.DOCKER_IMAGE_NAME }}:${{ env.branch_name }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.DOCKER_IMAGE_NAME }}:${{ env.timestamp }}
           cache-from: type=local,src=/tmp/.buildx-cache
-          cache-to: type=local,dest=/tmp/.buildx-cache,mode=max
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+          build-args: |
+            BUILD_VERSION=${{ env.sha_short }}
+            NODE_ENV=production
+
+      # Move cache to prevent growing forever
+      - name: Move cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+      - name: Scan built image for vulnerabilities
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.DOCKER_IMAGE_NAME }}:${{ env.sha_short }}
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Notify on failure
+        if: failure()
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '🚨 Docker build failed',
+              body: `Build failed for commit ${process.env.GITHUB_SHA}. [View run](${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID})`
+            })
