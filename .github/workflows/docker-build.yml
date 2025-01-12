@@ -1,4 +1,3 @@
-# .github/workflows/docker-build.yml trong frontend repo
 name: Frontend Docker Build
 
 on:
@@ -19,9 +18,18 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Extract Git SHA and branch name
+        id: vars
+        run: |
+          echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+          echo "branch_name=${GITHUB_REF_NAME}" >> $GITHUB_ENV
+
       - name: Build and push frontend
         uses: docker/build-push-action@v4
         with:
           context: .
           push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/frontend_full:latest
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/frontend_full:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/frontend_full:${{ env.sha_short }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/frontend_full:${{ env.branch_name }}
